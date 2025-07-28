@@ -1,5 +1,5 @@
 @echo off
-set LOGFILE=vitc1food_trinity_log.txt
+set LOGFILE=comc1food_trinity_log.txt
 echo. > %LOGFILE%
 
 REM Baseline 模型

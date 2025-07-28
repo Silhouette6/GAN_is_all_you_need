@@ -19,7 +19,7 @@ print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
 
 
 if torch.cuda.is_available():
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:1')
     print(device)
 else:
     device = torch.device('cpu')
@@ -41,7 +41,7 @@ config = {'n_epochs': -1,
           'expansion_factor': 2,  # TODO:是否确实相当于MLP？
           'label_smoothing': 0.1,
           'mix_ratio': 0.5694,
-          'erase_ratio': 0,
+          'erase_ratio': 0.0,
           'running_mod': 'eval',  # 'normal' , 'finetune' or 'eval'
           'plot_only': False,  # True: only plot confusion matrix
           'constant_save': True,
@@ -620,6 +620,9 @@ if __name__ == '__main__':
         # ---记录lr---
         writer.add_scalar("lr", get_current_lr(optimizer), epoch)
 
+        if config['constant_save'] and epoch % 5 == 0:
+            torch.save(vit.state_dict(), f'models/finetune/vit_trinity_{epoch}.pth')
+        
         scheduler.step()
         epoch += 1
     writer.close()
