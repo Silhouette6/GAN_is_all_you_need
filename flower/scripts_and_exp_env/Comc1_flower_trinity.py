@@ -47,17 +47,6 @@ config = {'n_epochs': -1,
           'constant_save': True,
           'model_path': 'models/com_c1.pth'
           }
-'''
-'patch_size': 16,  # 采样大小
-'embed_dim': 768,  # emded_dim必须能被n_heads整除
-'depth': 5,  # 堆叠Encoder Block的数量
-'n_heads': 6,  # 注意力头数
-'img_size': 224,  # 默认正方形
-'mlp_ratio': 4,  # MLP隐藏层的维度倍数，整数，默认4
-'label_smoothing': 0.1,  # 默认0.1，应该不用改
-'mix_ratio':0.30718,  # mixup混合率，0~1
-'erase_ratio': 0  # 0.1 -> 10%
-'''
 
 config['n_epochs'] = config['lr_stable_epochs'] + config['lr_decay_epochs']
 def str2bool(v):
@@ -251,7 +240,7 @@ class ConformerBlock(nn.Module):
 
 
 class Conformer(nn.Module):
-    def __init__(self, embed_dim=config['embed_dim'], depth=config['depth'], num_classes=101):
+    def __init__(self, embed_dim=config['embed_dim'], depth=config['depth'], num_classes=102):
         super().__init__()
         self.in_layer = PatchEmbed()
         self.num_patches = self.in_layer.num_patches  # 获取num_patches的大小
@@ -556,7 +545,7 @@ if __name__ == '__main__':
                 img, target_a, target_b, lam = mixup_data(img, target, alpha=config['mix_ratio'])
                 output = conformer(img)
                 # print(img.shape, target.shape)
-                # print(output.shape)
+                # print(output.shape[1])
                 loss = lam * loss_fn(output, target_a) + (1 - lam) * loss_fn(output, target_b)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
