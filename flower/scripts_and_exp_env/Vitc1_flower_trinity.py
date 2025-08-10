@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torchvision
+import argparse
 import timm
 from matplotlib import pyplot as plt
 from sklearn.metrics import confusion_matrix
@@ -16,7 +17,7 @@ from torchvision.transforms import transforms
 from torch.cuda.amp import autocast, GradScaler
 from eraser import PatchwiseRandomErasing
 
-
+print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
 if torch.cuda.is_available():
     device = torch.device('cuda:1')
     print(device)
@@ -40,14 +41,47 @@ config = {'n_epochs': -1,
           'mlp_ratio': 2,
           'label_smoothing': 0.1,
           'mix_ratio': 0.5694,
-          'erase_ratio': 0,
+          'erase_ratio': 0.0,
           'running_mod': 'eval',  # 'normal' , 'finetune' or 'eval'
           'plot_only': True,  # True: only plot confusion matrix
           'constant_save': True,
           'model_path': 'models/saved/vit_flower_ml6.pth'
           }
-
 config['n_epochs'] = config['lr_stable_epochs'] + config['lr_decay_epochs']
+
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+def parse_args_and_update_config(config):
+    parser = argparse.ArgumentParser()
+    for key, value in config.items():
+        if isinstance(value, bool):
+            parser.add_argument(f'--{key}', type=str2bool, default=value)
+        elif isinstance(value, int):
+            parser.add_argument(f'--{key}', type=int, default=value)
+        elif isinstance(value, float):
+            parser.add_argument(f'--{key}', type=float, default=value)
+        elif isinstance(value, str):
+            parser.add_argument(f'--{key}', type=str, default=value)
+    args = parser.parse_args()
+    for key in config.keys():
+        arg_val = getattr(args, key, None)
+        if arg_val is not None:
+            config[key] = arg_val
+    return config
+
+config = parse_args_and_update_config(config)
+print('当前配置:', config, '\n----------------------------------------------------------------')
+
+
 transform_train = transforms.Compose([transforms.Resize((config['img_size'], config['img_size'])),
                                 transforms.RandomHorizontalFlip(),
                                 # torchvision.transforms.AutoAugment(policy=torchvision.transforms.AutoAugmentPolicy.IMAGENET),
@@ -330,7 +364,7 @@ if __name__ == '__main__':
     print('loading data successfully!')
 
     # 初始化模型
-    vit = ViT().to(device)
+    vit = ViT()
 
     # 根据运行模式决定是否加载预训练模型
     if config['running_mod'] in ['finetune', 'eval']:
@@ -338,6 +372,7 @@ if __name__ == '__main__':
         print(f'loading model: {pretrained_path}')
         try:
             vit.load_state_dict(torch.load(pretrained_path, map_location='cpu'))
+            vit.to(device)
             print('load successfully!')
         except Exception as e:  # 若加载失败，检查是否是预训练模型
             if config['running_mod'] == 'eval':
@@ -404,6 +439,7 @@ if __name__ == '__main__':
 
         if config['plot_only']:
             print('Plotting completed...')
+            print('<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
             exit()
         
         # 计算训练集准确率
@@ -424,6 +460,7 @@ if __name__ == '__main__':
         overfitting_ratio = (avg_train_acc - avg_top1_acc) / avg_train_acc
         print(f'Training accuracy on {len(val_loader)} batches: {avg_train_acc * 100:.2f}%')
         print(f'Overfitting ratio: {overfitting_ratio * 100:.2f}%')
+        print('<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
         exit()
 
     # 训练模式（normal 或 finetune）
