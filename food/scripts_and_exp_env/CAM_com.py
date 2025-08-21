@@ -3,7 +3,7 @@ import cv2
 import torch
 import torchvision
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, RandomSampler, Subset
 from torchvision.transforms import transforms
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
@@ -17,12 +17,12 @@ import random
 random.seed(114514)
 
 if torch.cuda.is_available():
-    device = torch.device('cuda:1')
+    device = torch.device('cuda:0')
     print(device)
 else:
     device = torch.device('cpu')
     print(device)
-model_name = 'com_c1'
+model_name = 'comc1'
 config = {'n_epochs': -1,
           'batch_size': 1,  # don't change
           'num_workers': 0,  # don't change
@@ -39,7 +39,7 @@ config = {'n_epochs': -1,
           'label_smoothing': 0.1,
           'mix_ratio': 0.5694,
           'erase_ratio': 0.5,  # don't change
-          'n_sample': 10  # don't change
+          'n_sample': 100  # don't change
           }
 config['n_epochs'] = config['lr_stable_epochs'] + config['lr_decay_epochs']
 
@@ -55,7 +55,7 @@ transform_mask = transforms.Compose([transforms.Resize((config['img_size'], conf
 to_tensor = transforms.ToTensor()
 
 
-def get_dataloader(root, transform_real, transform_mask, batch_size):
+def get_dataloader_bak(root, transform_real, transform_mask, batch_size):
     food101_real = torchvision.datasets.Food101(root=root, split='test', download=False,
                                                 transform=transform_real)
     food101_mask = torchvision.datasets.Food101(root=root, split='test', download=False,
@@ -68,6 +68,40 @@ def get_dataloader(root, transform_real, transform_mask, batch_size):
                             drop_last=True, num_workers=config['num_workers'], pin_memory=True)
     masked_val_loader = DataLoader(masked_img, batch_size=batch_size, shuffle=False,
                                  drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+    return real_val_loader, masked_val_loader
+
+def get_dataloader(root, transform_real, transform_mask, batch_size, seed=78):
+    # 设置随机种子
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    # 加载原始数据和 mask 数据
+    food101_real = torchvision.datasets.Food101(root=root, split='test', download=False, transform=transform_real)
+    food101_mask = torchvision.datasets.Food101(root=root, split='test', download=False, transform=transform_mask)
+
+    # 选择相同的索引子集
+    # 获取所有数据的索引并打乱
+    all_indices = list(range(len(food101_real)))
+    np.random.seed(seed)
+    np.random.shuffle(all_indices)
+    indices = all_indices[:config['n_sample']]
+    real_img = Subset(food101_real, indices)
+    masked_img = Subset(food101_mask, indices)
+
+    # 使用相同的 sampler
+    sampler = RandomSampler(real_img, generator=generator)
+
+    real_val_loader = DataLoader(real_img, batch_size=batch_size, sampler=sampler,
+                                 drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+
+    # 再次使用相同的 sampler 或重新创建一个 generator
+    generator2 = torch.Generator()
+    generator2.manual_seed(seed)
+    sampler2 = RandomSampler(masked_img, generator=generator2)
+
+    masked_val_loader = DataLoader(masked_img, batch_size=batch_size, sampler=sampler2,
+                                   drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+
     return real_val_loader, masked_val_loader
 
 
@@ -277,7 +311,7 @@ def overlay_attention_on_image(img_tensor, attn_map_1d, alpha=0.6):
 if __name__ == '__main__':
     # ----------------------------------------------------
     # 设置新 log 目录
-    log_root = './Log/CAM_log'
+    log_root = './Log/CAM_com_log'
 
     # 获取已有 exp 子目录列表
     existing_logs = [d for d in os.listdir(log_root) if
@@ -292,7 +326,7 @@ if __name__ == '__main__':
     # ----------------------------------------------------
 
     conformer = Conformer()
-    conformer.load_state_dict(torch.load(f'./models/{model_name}.pth', map_location='cpu'))
+    conformer.load_state_dict(torch.load(f'./models/saved/{model_name}.pth', map_location='cpu'))
     conformer.eval().to(device)
 
     real_loader, mask_loader = get_dataloader(root='./datasets',

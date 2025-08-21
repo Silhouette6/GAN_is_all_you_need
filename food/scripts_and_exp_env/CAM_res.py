@@ -1,10 +1,11 @@
 import os
 import re
+import numpy as np
 import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, RandomSampler, Subset
 from torch.utils.tensorboard import SummaryWriter
 from torchcam.methods import SmoothGradCAMpp
 from torchcam.utils import overlay_mask
@@ -21,7 +22,7 @@ if torch.cuda.is_available():
 else:
     device = torch.device('cpu')
     print(device)
-model_name='resnet_mutual_learning_2'
+model_name='resnet_18_baseline'
 config = {'n_epochs': -1,
           'batch_size': 1,  # don't change
           'patch_size': 16,
@@ -34,7 +35,7 @@ config = {'n_epochs': -1,
           'label_smoothing': 0.1,  # default 0.1
           'mix_ratio': 0.5964,
           'erase_ratio': 0.5,  # 0.1 -> 10%, don't change
-          'n_sample': 50  # don't change
+          'n_sample': 100  # don't change
           }
 config['n_epochs'] = config['lr_stable_epochs'] + config['lr_decay_epochs']
 
@@ -51,7 +52,7 @@ to_tensor = transforms.ToTensor()
 
 
 
-def get_dataloader(root, transform_real, transform_mask, batch_size):
+def get_dataloader_bak(root, transform_real, transform_mask, batch_size):
     food101_real = torchvision.datasets.Food101(root=root, split='test', download=False,
                                                 transform=transform_real)
     food101_mask = torchvision.datasets.Food101(root=root, split='test', download=False,
@@ -65,6 +66,41 @@ def get_dataloader(root, transform_real, transform_mask, batch_size):
     masked_val_loader = DataLoader(masked_img, batch_size=batch_size, shuffle=False,
                                  drop_last=True, num_workers=config['num_workers'], pin_memory=True)
     return real_val_loader, masked_val_loader
+
+def get_dataloader(root, transform_real, transform_mask, batch_size, seed=78):
+    # 设置随机种子
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    # 加载原始数据和 mask 数据
+    food101_real = torchvision.datasets.Food101(root=root, split='test', download=False, transform=transform_real)
+    food101_mask = torchvision.datasets.Food101(root=root, split='test', download=False, transform=transform_mask)
+
+    # 选择相同的索引子集
+    # 获取所有数据的索引并打乱
+    all_indices = list(range(len(food101_real)))
+    np.random.seed(seed)
+    np.random.shuffle(all_indices)
+    indices = all_indices[:config['n_sample']]
+    real_img = Subset(food101_real, indices)
+    masked_img = Subset(food101_mask, indices)
+
+    # 使用相同的 sampler
+    sampler = RandomSampler(real_img, generator=generator)
+
+    real_val_loader = DataLoader(real_img, batch_size=batch_size, sampler=sampler,
+                                 drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+
+    # 再次使用相同的 sampler 或重新创建一个 generator
+    generator2 = torch.Generator()
+    generator2.manual_seed(seed)
+    sampler2 = RandomSampler(masked_img, generator=generator2)
+
+    masked_val_loader = DataLoader(masked_img, batch_size=batch_size, sampler=sampler2,
+                                   drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+
+    return real_val_loader, masked_val_loader
+
 
 
 class ResBlockType1(nn.Module):
@@ -173,7 +209,7 @@ if __name__ == '__main__':
         result = overlay_mask(to_pil_image(img), to_pil_image(activation_map[0], mode='F'),
                                 alpha=0.5)
         result_tensor = to_tensor(result)
-        writer.add_image("SmoothGradCAM++ Result/real", result_tensor, n_sample)
+        writer.add_image("Avg attention map/real", result_tensor, n_sample)
         writer.add_image("Imgs/real", img, n_sample)
         n_sample += 1
 
@@ -188,7 +224,7 @@ if __name__ == '__main__':
         result = overlay_mask(to_pil_image(img), to_pil_image(activation_map[0], mode='F'),
                                 alpha=0.5)
         result_tensor = to_tensor(result)
-        writer.add_image("SmoothGradCAM++ Result/masked", result_tensor, n_sample)
+        writer.add_image("Avg attention map/masked", result_tensor, n_sample)
         writer.add_image("Imgs/masked", img, n_sample)
         n_sample += 1
 

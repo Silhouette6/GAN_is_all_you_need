@@ -1,27 +1,28 @@
 import os
+import random
 import re
+import numpy as np
 import torch
 import torchvision
 import torchvision.transforms as transforms
+from eraser import PatchwiseRandomErasing
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, RandomSampler, Subset
 from torch.utils.tensorboard import SummaryWriter
 from torchcam.methods import SmoothGradCAMpp
 from torchcam.utils import overlay_mask
 from torchvision.transforms.functional import to_pil_image
 from tqdm import tqdm
-from eraser import PatchwiseRandomErasing
-import random
 
 random.seed(114514)
 
 if torch.cuda.is_available():
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:1')
     print(device)
 else:
     device = torch.device('cpu')
     print(device)
-model_name='resnet18_flower_baseline'
+model_name='resnet_mutual_learning_2'
 config = {'n_epochs': -1,
           'batch_size': 1,  # don't change
           'patch_size': 16,
@@ -34,7 +35,7 @@ config = {'n_epochs': -1,
           'label_smoothing': 0.1,  # default 0.1
           'mix_ratio': 0.5964,
           'erase_ratio': 0.5,  # 0.1 -> 10%, don't change
-          'n_sample': 50  # don't change
+          'n_sample': 100  # don't change
           }
 config['n_epochs'] = config['lr_stable_epochs'] + config['lr_decay_epochs']
 
@@ -51,19 +52,53 @@ to_tensor = transforms.ToTensor()
 
 
 
-def get_dataloader(root, transform_real, transform_mask, batch_size):
-    flower102_real = torchvision.datasets.Flowers102(root=root, split='test', download=False,
+def get_dataloader_bak(root, transform_real, transform_mask, batch_size):
+    food101_real = torchvision.datasets.Food101(root=root, split='test', download=False,
                                                 transform=transform_real)
-    flower102_mask = torchvision.datasets.Flowers102(root=root, split='test', download=False,
+    food101_mask = torchvision.datasets.Food101(root=root, split='test', download=False,
                                               transform=transform_mask)
     real_indices = list(range(0, config['n_sample']))
     masked_indices = list(range(0, config['n_sample']))
-    real_img = Subset(flower102_real, real_indices)
-    masked_img = Subset(flower102_mask, masked_indices)
+    real_img = Subset(food101_real, real_indices)
+    masked_img = Subset(food101_mask, masked_indices)
     real_val_loader = DataLoader(real_img, batch_size=batch_size, shuffle=False,
                             drop_last=True, num_workers=config['num_workers'], pin_memory=True)
     masked_val_loader = DataLoader(masked_img, batch_size=batch_size, shuffle=False,
                                  drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+    return real_val_loader, masked_val_loader
+
+def get_dataloader(root, transform_real, transform_mask, batch_size, seed=78):
+    # 设置随机种子
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    # 加载原始数据和 mask 数据
+    food101_real = torchvision.datasets.Food101(root=root, split='test', download=False, transform=transform_real)
+    food101_mask = torchvision.datasets.Food101(root=root, split='test', download=False, transform=transform_mask)
+
+    # 选择相同的索引子集
+    # 获取所有数据的索引并打乱
+    all_indices = list(range(len(food101_real)))
+    np.random.seed(seed)
+    np.random.shuffle(all_indices)
+    indices = all_indices[:config['n_sample']]
+    real_img = Subset(food101_real, indices)
+    masked_img = Subset(food101_mask, indices)
+
+    # 使用相同的 sampler
+    sampler = RandomSampler(real_img, generator=generator)
+
+    real_val_loader = DataLoader(real_img, batch_size=batch_size, sampler=sampler,
+                                 drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+
+    # 再次使用相同的 sampler 或重新创建一个 generator
+    generator2 = torch.Generator()
+    generator2.manual_seed(seed)
+    sampler2 = RandomSampler(masked_img, generator=generator2)
+
+    masked_val_loader = DataLoader(masked_img, batch_size=batch_size, sampler=sampler2,
+                                   drop_last=True, num_workers=config['num_workers'], pin_memory=True)
+
     return real_val_loader, masked_val_loader
 
 
@@ -102,7 +137,7 @@ class ResBlockType2(nn.Module):
 
 
 class ResNet18(nn.Module):  # 构建一个类ResNet18架构的残差神经网络
-    def __init__(self, dropout=config['dropout'], num_classes=102):
+    def __init__(self, dropout=config['dropout'], num_classes=101):
         super().__init__()
         self.in_layer = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),

@@ -17,31 +17,29 @@ import random
 random.seed(114514)
 
 if torch.cuda.is_available():
-    device = torch.device('cuda:1')
+    device = torch.device('cuda:0')
     print(device)
 else:
     device = torch.device('cpu')
     print(device)
-model_name='vitc1_flower_baseline'
+model_name='comc1_10'
+
 config = {'n_epochs': -1,
-          'batch_size': 1,  # don't change
-          'num_workers': 0,  # don't change
-          'lr': 0.00012715,
-          'lr_stable_epochs': 35,
-          'lr_decay_epochs': 25,
+          'class_names': None,
+          'batch_size': 1,
+          'num_workers': 0,
           'dropout': 0.10092,
           'patch_size': 16,
           'embed_dim': 768,
           'depth': 3,
           'n_heads': 6,
           'img_size': 224,
-          'mlp_ratio': 2,
+          'expansion_factor': 2,  # TODO:是否确实相当于MLP？
           'label_smoothing': 0.1,
           'mix_ratio': 0.5694,
-          'erase_ratio': 0.0,  # don't change
+          'erase_ratio': 0.5,
           'n_sample': 100  # don't change
           }
-config['n_epochs'] = config['lr_stable_epochs'] + config['lr_decay_epochs']
 
 transform_real = transforms.Compose([transforms.Resize((config['img_size'], config['img_size'])),
                                 transforms.ToTensor(),
@@ -69,6 +67,7 @@ def get_dataloader_bak(root, transform_real, transform_mask, batch_size):
     masked_val_loader = DataLoader(masked_img, batch_size=batch_size, shuffle=False,
                                  drop_last=True, num_workers=config['num_workers'], pin_memory=True)
     return real_val_loader, masked_val_loader
+
 
 def get_dataloader(root, transform_real, transform_mask, batch_size, seed=78):
     # 设置随机种子
@@ -124,52 +123,78 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class MLPBlock(nn.Module):
-    def __init__(self, in_dim, dropout=config['dropout'], mlp_ratio=config['mlp_ratio']):
-        # 在这个block中，特征数x的变化：x --> 4*x --> x
+class FeedForwardModule(nn.Module):
+    def __init__(self, embed_dim, expansion_factor=config['expansion_factor'], dropout=config['dropout']):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Linear(in_features=in_dim, out_features=in_dim * mlp_ratio),
-            nn.GELU(),
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim * expansion_factor),
+            nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(in_features=in_dim * mlp_ratio, out_features=in_dim),
-            nn.Dropout(dropout),
+            nn.Linear(embed_dim * expansion_factor, embed_dim),
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
-        x = self.layers(x)
-        return x
+        return self.layers(x)
 
 
-class EncoderBlock(nn.Module):  # TODO:需要输出注意力权重，以便可视化注意力图
+class ConvolutionModule(nn.Module):
+    def __init__(self, embed_dim, kernel_size=31):
+        super().__init__()
+        self.ln = nn.LayerNorm(embed_dim)
+        self.pointwise_conv1 = nn.Conv1d(embed_dim, 2 * embed_dim, kernel_size=1)
+        self.depthwise_conv = nn.Conv1d(embed_dim, embed_dim, kernel_size=kernel_size,
+                                        padding=kernel_size // 2, groups=embed_dim)
+        self.bn = nn.BatchNorm1d(embed_dim)
+        self.pointwise_conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=1)
+        self.activation = nn.SiLU()
+        self.drop = nn.Dropout(config['dropout'])
+
+    def forward(self, x):  # x: [B, T, C]
+        x_res = x
+        x = self.ln(x)
+        x = x.transpose(1, 2)  # [B, C, T]
+        x = self.pointwise_conv1(x)
+        x = nn.functional.glu(x, dim=1)  # [B, C, T]
+        x = self.depthwise_conv(x)
+        x = self.bn(x)
+        x = self.activation(x)
+        x = self.pointwise_conv2(x)
+        x = self.drop(x)
+        x = x.transpose(1, 2)  # [B, T, C]
+        return x + x_res
+
+
+class ConformerBlock(nn.Module):
     def __init__(self, embed_dim=config['embed_dim'],
                  num_heads=config['n_heads'], dropout=config['dropout']):
-        # 在这个block中，输入与输出的形状是一样的
         super().__init__()
-        self.ln_1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
-        self.drop_1 = nn.Dropout(dropout)
+        self.ffn1 = FeedForwardModule(embed_dim)
 
-        self.ln_2 = nn.LayerNorm(embed_dim)
-        self.mlp = MLPBlock(embed_dim, dropout=dropout)
-        self.drop_2 = nn.Dropout(dropout)
+        self.attn_ln = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout)
+        self.attn_drop = nn.Dropout(dropout)
+
+        self.conv = ConvolutionModule(embed_dim)
+        self.ffn2 = FeedForwardModule(embed_dim)
+
+        self.final_ln = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        x_res = x
-        x = self.ln_1(x)
-        attn_out, attn_weights = self.attn(x, x, x, need_weights=True, average_attn_weights=False)
-        attn_out = self.drop_1(attn_out)
-        x = attn_out + x_res
+        x = x + 0.5 * self.ffn1(x)
 
-        x_res = x
-        x = self.ln_2(x)
-        x = self.mlp(x)
-        x = self.drop_2(x)
-        x = x + x_res
+        attn_input = self.attn_ln(x)
+        attn_out, attn_weights = self.attn(attn_input, attn_input, attn_input, need_weights=True, average_attn_weights=False)
+        x = x + self.attn_drop(attn_out)
+
+        x = x + self.conv(x)
+        x = x + 0.5 * self.ffn2(x)
+        x = self.final_ln(x)
         return x, attn_weights  # <<< 返回 attn 权重
 
 
-class ViT(nn.Module):
+class Conformer(nn.Module):
     def __init__(self, embed_dim=config['embed_dim'], depth=config['depth'], num_classes=102):
         super().__init__()
         self.in_layer = PatchEmbed()
@@ -179,7 +204,7 @@ class ViT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, 1 + self.num_patches, embed_dim))  # 将pos注册为参数，让模型自己学习特征之间的位置关系
         self.drop = nn.Dropout(config['dropout'])
 
-        self.encoder_blocks = nn.Sequential(*[EncoderBlock() for _ in range(depth)])
+        self.encoder_blocks = nn.Sequential(*[ConformerBlock() for _ in range(depth)])
 
         self.ln = nn.LayerNorm(embed_dim)
         self.out_layer = nn.Linear(in_features=embed_dim, out_features=num_classes)
@@ -286,7 +311,7 @@ def overlay_attention_on_image(img_tensor, attn_map_1d, alpha=0.6):
 if __name__ == '__main__':
     # ----------------------------------------------------
     # 设置新 log 目录
-    log_root = './Log/CAM_vit_log'
+    log_root = './Log/CAM_com_log'
 
     # 获取已有 exp 子目录列表
     existing_logs = [d for d in os.listdir(log_root) if
@@ -300,19 +325,19 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=new_log_dir)
     # ----------------------------------------------------
 
-    vit = ViT()
-    vit.load_state_dict(torch.load(f'./models/saved(for_drawing)/{model_name}.pth', map_location='cpu'))
-    vit.eval().to(device)
+    conformer = Conformer()
+    conformer.load_state_dict(torch.load(f'./models/saved(for_drawing)/{model_name}.pth', map_location='cpu'))
+    conformer.eval().to(device)
 
     real_loader, mask_loader = get_dataloader(root='./datasets',
                                 transform_mask=transform_mask,transform_real=transform_real, batch_size=config['batch_size'])
     n_sample = 1
-    vit.eval()
+    conformer.eval()
 
     for img, _ in tqdm(real_loader, desc="Processing Batches", unit="batch"):
         # print(img.shape)
         img = img.to(device)
-        _, attn_maps = vit(img, return_attn=True)
+        _, attn_maps = conformer(img, return_attn=True)
 
         # print(attn_maps, len(attn_maps))
         last_attn = attn_maps[-1][0]  # shape: (heads, N, N)
@@ -334,7 +359,7 @@ if __name__ == '__main__':
     for img, _ in tqdm(mask_loader, desc="Processing Batches", unit="batch"):
         # print(img.shape)
         img = img.to(device)
-        _, attn_maps = vit(img, return_attn=True)
+        _, attn_maps = conformer(img, return_attn=True)
 
         # print(attn_maps, len(attn_maps))
         last_attn = attn_maps[-1][0]  # shape: (heads, N, N)
